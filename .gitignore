@@ -1,0 +1,45 @@
+@"
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.env
+.python-version
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Notebooks
+.ipynb_checkpoints/
+
+# Project artifacts
+mlruns/
+models/artifacts/
+models/registry.json
+logs/
+*.log
+
+# Data (keep repo lean)
+data/raw/*
+data/processed/*
+!data/README.md
+
+# Temp/partials
+*.partial.csv
+
+# Docker
+*.pid
+
+# Cache
+.cache/
+.huggingface/
+"@ | Out-File -Encoding utf8 .gitignore
