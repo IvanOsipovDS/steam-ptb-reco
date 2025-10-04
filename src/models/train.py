@@ -5,7 +5,7 @@ import mlflow.sklearn
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, f1_score
-from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -33,13 +33,13 @@ def load_data():
         raise FileNotFoundError(f"Processed dataset not found: {path}")
     df = pd.read_csv(path)
 
-    # Basic filtering: make sure target/owners exist
+    # Basic filtering: make sure target exists
     df = df.dropna(subset=["owners_mid", "target_tier"])
+
     # Features and target
     X = df[["developer", "publisher", "pos_ratio", "release_year", "desc"]].copy()
     y = df["target_tier"].astype(str).copy()
 
-    # Print basic diagnostics
     print(f"[train] Loaded dataset: {path}, shape={df.shape}")
     print(f"[train] Class distribution:\n{y.value_counts(normalize=True).round(3)}")
 
@@ -48,8 +48,8 @@ def load_data():
 
 def build_preprocessor():
     """
-    Preprocessor combines:
-      - OneHotEncoder for categorical features
+    Preprocessor:
+      - OneHotEncoder for categorical
       - SimpleImputer(median) for numerical
       - TfidfVectorizer for text
     """
@@ -69,24 +69,28 @@ def build_preprocessor():
     return pre
 
 
-def train_and_eval(model, X_train, X_val, y_train, y_val):
+def train_and_eval(model, X_train, X_val, y_train_enc, y_val_enc, class_names):
     """
-    Fit preprocessor + model; return fitted pipeline and metrics.
-    We compute multiclass ROC-AUC (OvR) and macro F1.
+    Fit preprocessor + model on encoded targets.
+    Returns fitted pipeline and metrics. Also attaches human-readable class_names to the pipeline.
     """
     pre = build_preprocessor()
     pipe = Pipeline([("pre", pre), ("clf", model)])
-    pipe.fit(X_train, y_train)
+    pipe.fit(X_train, y_train_enc)
 
     # AUC (OvR) if proba available
     try:
         y_proba = pipe.predict_proba(X_val)
-        auc = roc_auc_score(y_val, y_proba, multi_class="ovr")
+        auc = roc_auc_score(y_val_enc, y_proba, multi_class="ovr")
     except Exception:
         auc = np.nan
 
-    y_pred = pipe.predict(X_val)
-    f1 = f1_score(y_val, y_pred, average="macro")
+    y_pred_enc = pipe.predict(X_val)
+    f1 = f1_score(y_val_enc, y_pred_enc, average="macro")
+
+    # Attach original class names so downstream code can present strings
+    # Note: class_names is an array like ['high','low','mid'] in the correct encoded order.
+    pipe.class_names_ = np.array(class_names)
 
     return pipe, {"auc": float(auc) if auc == auc else np.nan, "f1": float(f1)}
 
@@ -94,17 +98,22 @@ def train_and_eval(model, X_train, X_val, y_train, y_val):
 def main():
     ensure_dir(ART)
 
-    # Configure MLflow to use local folder 'mlruns'
     mlflow.set_tracking_uri("file:" + str(ROOT / "mlruns"))
     mlflow.set_experiment("steam_ptb")
 
     X, y, df = load_data()
-    X_train, X_val, y_train, y_val = train_test_split(
-        X, y, stratify=y, test_size=0.2, random_state=42
+
+    # Encode target once and keep the mapping
+    le = LabelEncoder()
+    y_enc = le.fit_transform(y)  # values 0..K-1
+    class_names = le.classes_    # array of original string labels in encoded order
+
+    X_train, X_val, y_train_enc, y_val_enc = train_test_split(
+        X, y_enc, stratify=y_enc, test_size=0.2, random_state=42
     )
 
     candidates = {
-        "logreg": LogisticRegression(max_iter=300, n_jobs=1),
+        "logreg": LogisticRegression(max_iter=1000, n_jobs=1),
         "xgb": XGBClassifier(
             n_estimators=400,
             max_depth=6,
@@ -113,6 +122,7 @@ def main():
             colsample_bytree=0.8,
             objective="multi:softprob",
             eval_metric="mlogloss",
+            num_class=len(class_names),
             random_state=42,
         ),
     }
@@ -121,24 +131,22 @@ def main():
 
     for name, model in candidates.items():
         with mlflow.start_run(run_name=name):
-            pipe, metrics = train_and_eval(model, X_train, X_val, y_train, y_val)
+            pipe, metrics = train_and_eval(model, X_train, X_val, y_train_enc, y_val_enc, class_names)
 
-            # Log params and metrics to MLflow
+            # Log params/metrics
             mlflow.log_params({"model": name})
             mlflow.log_params(
                 {"n_train": len(X_train), "n_val": len(X_val), "tfidf_max_features": 5000}
             )
             for k, v in metrics.items():
-                if v == v:  # skip NaN
+                if v == v:
                     mlflow.log_metric(k, float(v))
 
-            # Select best mainly by AUC (fallback to F1 if AUC NaN)
             score = metrics["auc"] if metrics["auc"] == metrics["auc"] else metrics["f1"]
             print(f"[train] {name}: AUC={metrics['auc']:.4f} | F1={metrics['f1']:.4f}")
             if score > best_score:
                 best_name, best_score, best_pipe = name, score, pipe
 
-    # Persist best model and update registry
     best_path = ART / f"best_{best_name}.joblib"
     dump(best_pipe, best_path)
     write_json(REG, {"best_model_path": str(best_path)})
