@@ -1,0 +1,3 @@
+{
+  "best_model_path": "models/artifacts/best_xgb.joblib"
+}

@@ -34,7 +34,8 @@ def _load_model():
     path = Path(path_str)
     if not path.exists():
         raise FileNotFoundError(f"Model artifact not found: {path}")
-
+    if not path.is_absolute():
+        path = ROOT / path
     MODEL = load(path)
     MODEL_PATH = path
     return MODEL

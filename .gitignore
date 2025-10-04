@@ -43,3 +43,9 @@ data/processed/*
 .cache/
 .huggingface/
 "@ | Out-File -Encoding utf8 .gitignore
+
+# include trained model for deployment
+!models/
+!models/registry.json
+!models/artifacts/
+!models/artifacts/*.joblib

@@ -149,7 +149,12 @@ def main():
 
     best_path = ART / f"best_{best_name}.joblib"
     dump(best_pipe, best_path)
-    write_json(REG, {"best_model_path": str(best_path)})
+    try:
+        rel = best_path.relative_to(ROOT)
+        write_json(REG, {"best_model_path": str(rel).replace("\\", "/")})
+    except Exception:
+        # fallback
+        write_json(REG, {"best_model_path": f"models/artifacts/{best_path.name}"})
 
     print(f"[train] Best model: {best_name} | score={best_score:.4f}")
     print(f"[train] Saved best model to: {best_path}")
