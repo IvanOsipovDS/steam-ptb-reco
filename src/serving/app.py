@@ -5,6 +5,7 @@ from joblib import load
 from pathlib import Path
 import os
 import time
+import pandas as pd
 
 from ..utils.io import ROOT, read_json
 
@@ -109,13 +110,13 @@ def predict_ptb(req: PredictRequest):
         raise HTTPException(status_code=503, detail="Model not loaded")
 
     # Ensure feature order matches training
-    X = [[
-        req.developer or "",
-        req.publisher or "",
-        req.pos_ratio if req.pos_ratio is not None else 0.5,
-        req.release_year if req.release_year is not None else 2018,
-        req.desc or ""
-    ]]
+    X = pd.DataFrame([{
+        "developer": req.developer or "",
+        "publisher": req.publisher or "",
+        "pos_ratio": req.pos_ratio if req.pos_ratio is not None else 0.5,
+        "release_year": req.release_year if req.release_year is not None else 2018,
+        "desc": req.desc or ""
+    }])
 
     # Predict probabilities (OvR order)
     try:
