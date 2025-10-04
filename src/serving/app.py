@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import time
 import pandas as pd
+from fastapi.responses import RedirectResponse
 
 from ..utils.io import ROOT, read_json
 
@@ -62,6 +63,9 @@ class PredictResponse(BaseModel):
     pred_class: str
     proba: Dict[str, float]
 
+@app.get("/")
+def root():
+    return RedirectResponse(url="/docs")
 
 @app.get("/health")
 def health():
