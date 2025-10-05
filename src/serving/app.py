@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel
 from typing import Optional, List, Dict
 from joblib import load
@@ -7,6 +7,8 @@ import os
 import time
 import pandas as pd
 from fastapi.responses import RedirectResponse
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
 
 from ..utils.io import ROOT, read_json
 
@@ -17,6 +19,55 @@ REG_PATH = ROOT / "models" / "registry.json"
 MODEL = None
 MODEL_PATH = None
 
+# ---- catalog for recommendations ----
+CATALOG_PATH = ROOT / "data" / "catalog" / "catalog.csv"
+DF = None                 # catalog dataframe
+TFIDF = None              # fitted vectorizer
+DESC_MTX = None           # TF-IDF matrix (sparse)
+APPIDX = None             # appid -> row index
+PTB_HIGH = None           # vector of P(high) for each row
+
+def _load_catalog():
+    """
+    Load deployed catalog and build TF-IDF matrix for 'desc'.
+    """
+    global DF, TFIDF, DESC_MTX, APPIDX
+    if not CATALOG_PATH.exists():
+        raise FileNotFoundError(f"Catalog not found: {CATALOG_PATH}")
+    DF = pd.read_csv(CATALOG_PATH)
+    required = {"appid","name","developer","publisher","pos_ratio","release_year","desc"}
+    missing = required - set(DF.columns)
+    if missing:
+        raise RuntimeError(f"Missing columns in catalog: {missing}")
+
+    TFIDF = TfidfVectorizer(max_features=5000, ngram_range=(1,2))
+    DESC_MTX = TFIDF.fit_transform(DF["desc"].fillna(""))
+    APPIDX = {int(a): i for i, a in enumerate(DF["appid"].astype(int))}
+
+def _precompute_ptb_high():
+    """
+    Precompute P(high) for the catalog using the trained MODEL (one-time).
+    """
+    global PTB_HIGH
+    if MODEL is None:
+        PTB_HIGH = None
+        return
+    X = pd.DataFrame({
+        "developer": DF["developer"].fillna(""),
+        "publisher": DF["publisher"].fillna(""),
+        "pos_ratio": DF["pos_ratio"].fillna(0.5),
+        "release_year": DF["release_year"].fillna(2018).astype(int),
+        "desc": DF["desc"].fillna(""),
+    })
+    proba = MODEL.predict_proba(X)
+    class_names = getattr(MODEL, "class_names_", None) or getattr(MODEL, "classes_", None)
+    class_names = list(class_names) if class_names is not None else list(range(proba.shape[1]))
+    try:
+        idx_high = class_names.index("high")
+    except Exception:
+        # fallback: if label names unknown — use argmax per row is meaningless here; pick last col
+        idx_high = min(proba.shape[1]-1, 0)
+    PTB_HIGH = pd.Series(proba[:, idx_high], index=DF.index)
 
 def _load_model():
     """
@@ -42,7 +93,7 @@ def _load_model():
     return MODEL
 
 
-# Load model at startup
+# Load model & catalog at startup
 try:
     _load_model()
 except Exception as e:
@@ -50,6 +101,15 @@ except Exception as e:
     MODEL = None
     MODEL_PATH = None
 
+try:
+    _load_catalog()
+    _precompute_ptb_high()
+except Exception:
+    DF = None
+    TFIDF = None
+    DESC_MTX = None
+    APPIDX = None
+    PTB_HIGH = None
 
 class PredictRequest(BaseModel):
     developer: Optional[str] = ""
@@ -101,6 +161,8 @@ def reload_model():
     """
     try:
         _load_model()
+        if DF is not None:
+            _precompute_ptb_high()
         return {"status": "reloaded", "model_path": str(MODEL_PATH)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
@@ -146,3 +208,65 @@ def predict_ptb(req: PredictRequest):
         pred_class=pred_label,
         proba={str(c): float(p) for c, p in zip(class_names, proba)}
     )
+
+@app.get("/recommend")
+def recommend(
+    appid: int = Query(..., description="Source appid"),
+    k: int = Query(10, ge=1, le=50),
+    alpha: float = Query(0.7, ge=0.0, le=1.0, description="blend: similarity vs PTB(high)"),
+    same_developer: bool = Query(False, description="exclude same developer as source"),
+    year_from: int | None = Query(None, description="optional min release year"),
+):
+    """
+    Content-based recommendations with PTB re-ranking.
+    score = alpha * cosine(desc, desc_i) + (1 - alpha) * P(high)_i
+    """
+    if DF is None or DESC_MTX is None or APPIDX is None:
+        raise HTTPException(status_code=503, detail="Catalog not loaded")
+
+    if appid not in APPIDX:
+        raise HTTPException(status_code=404, detail=f"appid {appid} not found in catalog")
+
+    src_idx = APPIDX[appid]
+    sim = cosine_similarity(DESC_MTX[src_idx], DESC_MTX).ravel()
+    sim[src_idx] = 0.0  # exclude itself
+
+    # filters
+    mask = pd.Series(True, index=DF.index)
+    if same_developer:
+        src_dev = str(DF.iloc[src_idx]["developer"])
+        mask &= DF["developer"].astype(str).ne(src_dev)
+    if year_from is not None:
+        mask &= DF["release_year"].fillna(0).astype(int).ge(int(year_from))
+
+    # blended score
+    if PTB_HIGH is None:
+        score = alpha * sim
+    else:
+        score = alpha * sim + (1.0 - alpha) * PTB_HIGH.values
+
+    score_masked = score.copy()
+    score_masked[~mask.values] = -1e9
+
+    top_idx = score_masked.argsort()[::-1][:k]
+    items = []
+    for i in top_idx:
+        r = DF.iloc[i]
+        items.append({
+            "appid": int(r["appid"]),
+            "name": str(r.get("name","")),
+            "developer": str(r.get("developer","")),
+            "publisher": str(r.get("publisher","")),
+            "release_year": int(r.get("release_year")) if pd.notna(r.get("release_year")) else None,
+            "similarity": float(sim[i]),
+            "ptb_high": float(PTB_HIGH.iloc[i]) if PTB_HIGH is not None else None,
+            "score": float(score[i]),
+        })
+
+    src = DF.iloc[src_idx][["appid","name","developer","publisher","release_year"]].to_dict()
+    src["appid"] = int(src["appid"])
+    src["release_year"] = int(src["release_year"]) if pd.notna(src["release_year"]) else None
+
+    return {"source": src, "k": k, "alpha": alpha,
+            "filters": {"same_developer": same_developer, "year_from": year_from},
+            "items": items}
