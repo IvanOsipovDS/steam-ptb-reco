@@ -26,22 +26,75 @@ DESC_MTX = None           # TF-IDF matrix (sparse)
 APPIDX = None             # appid -> row index
 PTB_HIGH = None           # vector of P(high) for each row
 
+# --- add near other globals ---
+CATALOG_ERROR = None  # last catalog load error (string)
+
+
 def _load_catalog():
     """
-    Load deployed catalog and build TF-IDF matrix for 'desc'.
+    Load catalog CSV and build TF-IDF. Be robust to missing columns.
     """
-    global DF, TFIDF, DESC_MTX, APPIDX
-    if not CATALOG_PATH.exists():
-        raise FileNotFoundError(f"Catalog not found: {CATALOG_PATH}")
-    DF = pd.read_csv(CATALOG_PATH)
-    required = {"appid","name","developer","publisher","pos_ratio","release_year","desc"}
-    missing = required - set(DF.columns)
-    if missing:
-        raise RuntimeError(f"Missing columns in catalog: {missing}")
+    global DF, TFIDF, DESC_MTX, APPIDX, CATALOG_ERROR
+    CATALOG_ERROR = None
+    try:
+        if not CATALOG_PATH.exists():
+            raise FileNotFoundError(f"Catalog not found: {CATALOG_PATH}")
 
-    TFIDF = TfidfVectorizer(max_features=5000, ngram_range=(1,2))
-    DESC_MTX = TFIDF.fit_transform(DF["desc"].fillna(""))
-    APPIDX = {int(a): i for i, a in enumerate(DF["appid"].astype(int))}
+        # robust read
+        df = pd.read_csv(CATALOG_PATH, low_memory=False)
+
+        # normalize column names (strip / lower)
+        df.columns = [c.strip() for c in df.columns]
+
+        # required base columns (we can synthesize desc if missing)
+        base_needed = {"appid", "name", "developer", "publisher", "pos_ratio", "release_year"}
+        missing_base = [c for c in base_needed if c not in df.columns]
+        for c in missing_base:
+            # fill sensible defaults if absent
+            if c == "pos_ratio":
+                df[c] = 0.5
+            elif c == "release_year":
+                df[c] = 2018
+            elif c in {"developer", "publisher"}:
+                df[c] = ""
+            elif c == "name":
+                df[c] = ""
+            elif c == "appid":
+                raise RuntimeError("Column 'appid' is required in catalog.csv")
+
+        # ensure integer appid/year where possible
+        df["appid"] = pd.to_numeric(df["appid"], errors="coerce").astype("Int64")
+        df["release_year"] = pd.to_numeric(df["release_year"], errors="coerce").fillna(2018).astype(int)
+        df["pos_ratio"] = pd.to_numeric(df["pos_ratio"], errors="coerce").fillna(0.5)
+
+        # build/sanitize desc
+        if "desc" not in df.columns:
+            # synthesize from text-y fields
+            df["desc"] = (
+                df["name"].fillna("").astype(str) + " "
+                + df["developer"].fillna("").astype(str) + " "
+                + df["publisher"].fillna("").astype(str)
+            )
+        else:
+            df["desc"] = df["desc"].fillna("").astype(str)
+
+        # drop rows without appid/name
+        df = df.dropna(subset=["appid", "name"]).copy()
+        df["appid"] = df["appid"].astype(int)
+
+        # finally assign globals
+        DF = df.reset_index(drop=True)
+        TFIDF = TfidfVectorizer(max_features=5000, ngram_range=(1, 2))
+        DESC_MTX = TFIDF.fit_transform(DF["desc"])
+        APPIDX = {int(a): i for i, a in enumerate(DF["appid"])}
+
+    except Exception as e:
+        # expose error in health
+        DF = None
+        TFIDF = None
+        DESC_MTX = None
+        APPIDX = None
+        CATALOG_ERROR = f"{type(e).__name__}: {e}"
 
 def _precompute_ptb_high():
     """
@@ -100,10 +153,12 @@ except Exception as e:
     MODEL = None
     MODEL_PATH = None
 
+# Load catalog + build TF-IDF + precompute PTB(high)
 try:
     _load_catalog()
     _precompute_ptb_high()
 except Exception:
+    # if anything fails, expose via /health and keep API alive
     DF = None
     TFIDF = None
     DESC_MTX = None
@@ -128,10 +183,6 @@ def root():
 
 @app.get("/health")
 def health():
-    """
-    Health probe with basic model info if loaded.
-    """
-    ok = MODEL is not None
     return {
         "status": "ok",
         "model_loaded": MODEL is not None,
@@ -140,8 +191,8 @@ def health():
         "catalog_path": str(CATALOG_PATH),
         "catalog_exists": CATALOG_PATH.exists(),
         "catalog_rows": int(DF.shape[0]) if DF is not None else 0,
+        "catalog_error": CATALOG_ERROR,
     }
-
 
 @app.get("/version")
 def version():
@@ -164,6 +215,7 @@ def reload_model():
     """
     try:
         _load_model()
+        # after model reload, recompute PTB(high) over the catalog if it is loaded
         if DF is not None:
             _precompute_ptb_high()
         return {"status": "reloaded", "model_path": str(MODEL_PATH)}
