@@ -1,4 +1,15 @@
-# Python cache / IDE
+# Logs & mlflow
+mlruns/
+logs/
+*.log
+
+# Ignore heavy data folders, but keep catalog
+data/raw/
+data/processed/
+
+# Git / misc
+.git/
+.gitignore
 __pycache__/
 *.pyc
 .venv/
@@ -6,16 +17,3 @@ env/
 .DS_Store
 .vscode/
 .idea/
-
-# Logs & mlflow
-mlruns/
-logs/
-*.log
-
-# Keep data catalog for /recommend, but ignore heavy folders
-data/raw/
-data/processed/
-
-# Git
-.git/
-.gitignore
