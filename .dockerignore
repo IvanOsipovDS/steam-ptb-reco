@@ -21,3 +21,8 @@ logs/
 # Git
 .git/
 .gitignore
+
+# BUT include the small catalog for /recommend
+!data/
+!data/catalog/
+!data/catalog/catalog.csv
