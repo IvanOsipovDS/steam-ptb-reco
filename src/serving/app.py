@@ -15,12 +15,11 @@ from ..utils.io import ROOT, read_json
 app = FastAPI(title="Steam PTB & Reco API", version="0.1.0")
 
 REG_PATH = ROOT / "models" / "registry.json"
-
+CATALOG_PATH = Path(__file__).resolve().parent / "catalog.csv"
 MODEL = None
 MODEL_PATH = None
 
 # ---- catalog for recommendations ----
-CATALOG_PATH = ROOT / "data" / "catalog" / "catalog.csv"
 DF = None                 # catalog dataframe
 TFIDF = None              # fitted vectorizer
 DESC_MTX = None           # TF-IDF matrix (sparse)
@@ -134,9 +133,13 @@ def health():
     """
     ok = MODEL is not None
     return {
-        "status": "ok" if ok else "degraded",
-        "model_loaded": ok,
+        "status": "ok",
+        "model_loaded": MODEL is not None,
         "model_path": str(MODEL_PATH) if MODEL_PATH else None,
+        "catalog_loaded": DF is not None,
+        "catalog_path": str(CATALOG_PATH),
+        "catalog_exists": CATALOG_PATH.exists(),
+        "catalog_rows": int(DF.shape[0]) if DF is not None else 0,
     }
 
 
