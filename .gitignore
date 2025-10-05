@@ -49,3 +49,8 @@ data/processed/*
 !models/registry.json
 !models/artifacts/
 !models/artifacts/*.joblib
+
+# include deployed catalog for /recommend
+!data/
+!data/catalog/
+!data/catalog/catalog.csv
