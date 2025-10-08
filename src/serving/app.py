@@ -106,16 +106,15 @@ def _precompute_ptb_high():
     if MODEL is None or DF is None:
         raise RuntimeError("MODEL or DF is not available")
 
-    # Use the same feature set as in training
     feat_cols = ["developer", "publisher", "pos_ratio", "release_year", "desc"]
     X = DF[feat_cols]
-    p_high = _proba_high(MODEL, X)          # <-- ключевая строка
-    # sanity shape
+    p_high = _proba_high(MODEL, X)
+
     if p_high.shape[0] != DF.shape[0]:
         raise ValueError(f"p_high shape mismatch: {p_high.shape} vs DF {DF.shape}")
-    # store
-    globals()["PTB_HIGH"] = p_high
 
+    # строго 1D float ndarray
+    globals()["PTB_HIGH"] = np.asarray(p_high, dtype=float).ravel()
 
 def _proba_high(model, X):
     """
@@ -123,19 +122,17 @@ def _proba_high(model, X):
     Works whether classes_ are ['high','low','mid'] or [0,1,2].
     """
     proba = np.asarray(model.predict_proba(X))
-    if proba.ndim == 1:  # unlikely, but guard
-        return proba
+    if proba.ndim == 1:          # guard
+        return proba.ravel()     # <— добавил ravel()
 
     high_idx = None
     classes = getattr(model, "classes_", None)
     if classes is not None:
-        # look for 'high' (string) or the largest ordinal (e.g., 2)
         for i, c in enumerate(classes):
             if isinstance(c, str) and c.lower() == "high":
                 high_idx = i
                 break
         if high_idx is None:
-            # fall back: assume the highest label is 'high'
             try:
                 high_idx = int(np.argmax(classes))
             except Exception:
@@ -143,7 +140,7 @@ def _proba_high(model, X):
     else:
         high_idx = proba.shape[1] - 1
 
-    return proba[:, high_idx]
+    return proba[:, high_idx].ravel()
 
 def _load_model():
     """
@@ -331,7 +328,7 @@ def recommend(
     if PTB_HIGH is None:
         score = alpha * sim
     else:
-        score = alpha * sim + (1.0 - alpha) * PTB_HIGH.values
+        score = alpha * sim + (1.0 - alpha) * PTB_HIGH 
 
     score_masked = score.copy()
     score_masked[~mask.values] = -1e9
@@ -347,7 +344,7 @@ def recommend(
             "publisher": str(r.get("publisher","")),
             "release_year": int(r.get("release_year")) if pd.notna(r.get("release_year")) else None,
             "similarity": float(sim[i]),
-            "ptb_high": float(PTB_HIGH.iloc[i]) if PTB_HIGH is not None else None,
+            "ptb_high": float(PTB_HIGH[i]) if PTB_HIGH is not None else None,   # <— без .iloc
             "score": float(score[i]),
         })
 
