@@ -6,6 +6,7 @@ from pathlib import Path
 import os
 import time
 import pandas as pd
+import numpy as np
 from fastapi.responses import RedirectResponse
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
@@ -99,28 +100,50 @@ def _load_catalog():
 
 def _precompute_ptb_high():
     """
-    Precompute P(high) for the catalog using the trained MODEL (one-time).
+    Precompute P(high) for all items in DF using the loaded MODEL.
+    Non-fatal: raise to caller; caller will put error into PRECOMPUTE_ERROR.
     """
-    global PTB_HIGH
-    if MODEL is None:
-        PTB_HIGH = None
-        return
-    X = pd.DataFrame({
-        "developer": DF["developer"].fillna(""),
-        "publisher": DF["publisher"].fillna(""),
-        "pos_ratio": DF["pos_ratio"].fillna(0.5),
-        "release_year": DF["release_year"].fillna(2018).astype(int),
-        "desc": DF["desc"].fillna(""),
-    })
-    proba = MODEL.predict_proba(X)
-    class_names = getattr(MODEL, "class_names_", None) or getattr(MODEL, "classes_", None)
-    class_names = list(class_names) if class_names is not None else list(range(proba.shape[1]))
-    try:
-        idx_high = class_names.index("high")
-    except Exception:
-        # fallback: if label names unknown — use argmax per row is meaningless here; pick last col
-        idx_high = min(proba.shape[1]-1, 0)
-    PTB_HIGH = pd.Series(proba[:, idx_high], index=DF.index)
+    if MODEL is None or DF is None:
+        raise RuntimeError("MODEL or DF is not available")
+
+    # Use the same feature set as in training
+    feat_cols = ["developer", "publisher", "pos_ratio", "release_year", "desc"]
+    X = DF[feat_cols]
+    p_high = _proba_high(MODEL, X)          # <-- ключевая строка
+    # sanity shape
+    if p_high.shape[0] != DF.shape[0]:
+        raise ValueError(f"p_high shape mismatch: {p_high.shape} vs DF {DF.shape}")
+    # store
+    globals()["PTB_HIGH"] = p_high
+
+
+def _proba_high(model, X):
+    """
+    Return probability for the 'high' tier class.
+    Works whether classes_ are ['high','low','mid'] or [0,1,2].
+    """
+    proba = np.asarray(model.predict_proba(X))
+    if proba.ndim == 1:  # unlikely, but guard
+        return proba
+
+    high_idx = None
+    classes = getattr(model, "classes_", None)
+    if classes is not None:
+        # look for 'high' (string) or the largest ordinal (e.g., 2)
+        for i, c in enumerate(classes):
+            if isinstance(c, str) and c.lower() == "high":
+                high_idx = i
+                break
+        if high_idx is None:
+            # fall back: assume the highest label is 'high'
+            try:
+                high_idx = int(np.argmax(classes))
+            except Exception:
+                high_idx = proba.shape[1] - 1
+    else:
+        high_idx = proba.shape[1] - 1
+
+    return proba[:, high_idx]
 
 def _load_model():
     """
@@ -163,13 +186,13 @@ except Exception as e:
     APPIDX = None
     CATALOG_ERROR = f"{type(e).__name__}: {e}"
 
-# ---- try to precompute P(high) (non-fatal) ----
+# --- precompute PTB (non fatal) ---
 PRECOMPUTE_ERROR = None
 try:
     if DF is not None:
         _precompute_ptb_high()
 except Exception as e:
-    PTB_HIGH = None  # пусть рекомендация работает без PTB
+    PTB_HIGH = None
     PRECOMPUTE_ERROR = f"{type(e).__name__}: {e}"
 
 class PredictRequest(BaseModel):
@@ -202,7 +225,6 @@ def health():
         "precompute_error": PRECOMPUTE_ERROR,
     }
 
-
 @app.get("/version")
 def version():
     """
@@ -227,7 +249,7 @@ def reload_model():
             try:
                 _precompute_ptb_high()
             except Exception as e:
-                PTB_HIGH = None
+                globals()["PTB_HIGH"] = None
                 PRECOMPUTE_ERROR = f"{type(e).__name__}: {e}"
         return {"status": "reloaded", "model_path": str(MODEL_PATH)}
     except Exception as e:
