@@ -29,6 +29,7 @@ PTB_HIGH = None           # vector of P(high) for each row
 # --- add near other globals ---
 CATALOG_ERROR = None  # last catalog load error (string)
 
+PRECOMPUTE_ERROR = None  # last error during _precompute_ptb_high
 
 def _load_catalog():
     """
@@ -144,26 +145,32 @@ def _load_model():
     MODEL_PATH = path
     return MODEL
 
-
-# Load model & catalog at startup
+# ---- load model at startup ----
 try:
     _load_model()
-except Exception as e:
-    # Delay actual raising to endpoints; allow /health to report error
+except Exception:
     MODEL = None
     MODEL_PATH = None
 
-# Load catalog + build TF-IDF + precompute PTB(high)
+# ---- load catalog (robust), but DO NOT clear it if precompute fails ----
+CATALOG_ERROR = None
 try:
-    _load_catalog()
-    _precompute_ptb_high()
-except Exception:
-    # if anything fails, expose via /health and keep API alive
+    _load_catalog()  # только загрузка CSV + TF-IDF
+except Exception as e:
     DF = None
     TFIDF = None
     DESC_MTX = None
     APPIDX = None
-    PTB_HIGH = None
+    CATALOG_ERROR = f"{type(e).__name__}: {e}"
+
+# ---- try to precompute P(high) (non-fatal) ----
+PRECOMPUTE_ERROR = None
+try:
+    if DF is not None:
+        _precompute_ptb_high()
+except Exception as e:
+    PTB_HIGH = None  # пусть рекомендация работает без PTB
+    PRECOMPUTE_ERROR = f"{type(e).__name__}: {e}"
 
 class PredictRequest(BaseModel):
     developer: Optional[str] = ""
@@ -192,7 +199,9 @@ def health():
         "catalog_exists": CATALOG_PATH.exists(),
         "catalog_rows": int(DF.shape[0]) if DF is not None else 0,
         "catalog_error": CATALOG_ERROR,
+        "precompute_error": PRECOMPUTE_ERROR,
     }
+
 
 @app.get("/version")
 def version():
@@ -210,14 +219,16 @@ def version():
 
 @app.post("/reload")
 def reload_model():
-    """
-    Reload model from registry.json (use after retraining).
-    """
+    global PRECOMPUTE_ERROR
     try:
         _load_model()
-        # after model reload, recompute PTB(high) over the catalog if it is loaded
+        PRECOMPUTE_ERROR = None
         if DF is not None:
-            _precompute_ptb_high()
+            try:
+                _precompute_ptb_high()
+            except Exception as e:
+                PTB_HIGH = None
+                PRECOMPUTE_ERROR = f"{type(e).__name__}: {e}"
         return {"status": "reloaded", "model_path": str(MODEL_PATH)}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Reload failed: {e}")
