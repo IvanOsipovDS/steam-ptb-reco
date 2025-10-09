@@ -10,7 +10,6 @@ import numpy as np
 from fastapi.responses import RedirectResponse
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-
 from ..utils.io import ROOT, read_json
 
 app = FastAPI(title="Steam PTB & Reco API", version="0.1.0")
@@ -301,20 +300,19 @@ def recommend(
     alpha: float = Query(0.7, ge=0.0, le=1.0, description="blend: similarity vs PTB(high)"),
     same_developer: bool = Query(False, description="exclude same developer as source"),
     year_from: int | None = Query(None, description="optional min release year"),
+    use_ptb: bool = Query(True, description="use PTB(high) for re-ranking"),
+    min_score: float | None = Query(None, description="optional minimum blended score"),
+    fields: Optional[List[str]] = Query(None, description="return only these item fields"),
+    debug: bool = Query(False, description="include debug metadata"),
 ):
-    """
-    Content-based recommendations with PTB re-ranking.
-    score = alpha * cosine(desc, desc_i) + (1 - alpha) * P(high)_i
-    """
     if DF is None or DESC_MTX is None or APPIDX is None:
         raise HTTPException(status_code=503, detail="Catalog not loaded")
-
     if appid not in APPIDX:
         raise HTTPException(status_code=404, detail=f"appid {appid} not found in catalog")
 
     src_idx = APPIDX[appid]
     sim = cosine_similarity(DESC_MTX[src_idx], DESC_MTX).ravel()
-    sim[src_idx] = 0.0  # exclude itself
+    sim[src_idx] = 0.0
 
     # filters
     mask = pd.Series(True, index=DF.index)
@@ -325,33 +323,59 @@ def recommend(
         mask &= DF["release_year"].fillna(0).astype(int).ge(int(year_from))
 
     # blended score
-    if PTB_HIGH is None:
+    if not use_ptb or PTB_HIGH is None:
         score = alpha * sim
+        used_alpha = 1.0  # фактически чистый sim
     else:
-        score = alpha * sim + (1.0 - alpha) * PTB_HIGH 
+        score = alpha * sim + (1.0 - alpha) * PTB_HIGH
+        used_alpha = alpha
 
+    # пороги + маска
     score_masked = score.copy()
     score_masked[~mask.values] = -1e9
+    if min_score is not None:
+        score_masked[score_masked < float(min_score)] = -1e9
 
+    # top-k
     top_idx = score_masked.argsort()[::-1][:k]
+
+    # сбор ответа
+    def pick_fields(row_dict: dict) -> dict:
+        if fields:
+            return {k: row_dict.get(k) for k in fields if k in row_dict}
+        return row_dict
+
     items = []
     for i in top_idx:
         r = DF.iloc[i]
-        items.append({
+        item = {
             "appid": int(r["appid"]),
-            "name": str(r.get("name","")),
-            "developer": str(r.get("developer","")),
-            "publisher": str(r.get("publisher","")),
+            "name": str(r.get("name", "")),
+            "developer": str(r.get("developer", "")),
+            "publisher": str(r.get("publisher", "")),
             "release_year": int(r.get("release_year")) if pd.notna(r.get("release_year")) else None,
             "similarity": float(sim[i]),
-            "ptb_high": float(PTB_HIGH[i]) if PTB_HIGH is not None else None,   # <— без .iloc
+            "ptb_high": float(PTB_HIGH[i]) if (use_ptb and PTB_HIGH is not None) else None,
             "score": float(score[i]),
-        })
+        }
+        items.append(pick_fields(item))
 
     src = DF.iloc[src_idx][["appid","name","developer","publisher","release_year"]].to_dict()
     src["appid"] = int(src["appid"])
     src["release_year"] = int(src["release_year"]) if pd.notna(src["release_year"]) else None
 
-    return {"source": src, "k": k, "alpha": alpha,
-            "filters": {"same_developer": same_developer, "year_from": year_from},
-            "items": items}
+    payload = {
+        "source": src,
+        "k": k,
+        "alpha": used_alpha,
+        "use_ptb": use_ptb and (PTB_HIGH is not None),
+        "filters": {"same_developer": same_developer, "year_from": year_from, "min_score": min_score},
+        "count": len(items),
+        "items": items
+    }
+    if debug:
+        payload["debug"] = {
+            "catalog_rows": int(DF.shape[0]),
+            "ptb_available": PTB_HIGH is not None,
+        }
+    return payload
