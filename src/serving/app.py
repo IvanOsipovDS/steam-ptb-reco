@@ -203,6 +203,37 @@ class PredictResponse(BaseModel):
     pred_class: str
     proba: Dict[str, float]
 
+class RecoItem(BaseModel):
+    appid: int
+    name: str
+    developer: Optional[str] = None
+    publisher: Optional[str] = None
+    release_year: Optional[int] = None
+    similarity: float
+    ptb_high: Optional[float] = None
+    score: float
+
+class RecoSource(BaseModel):
+    appid: int
+    name: str
+    developer: Optional[str] = None
+    publisher: Optional[str] = None
+    release_year: Optional[int] = None
+
+class RecoFilters(BaseModel):
+    same_developer: bool
+    year_from: Optional[int] = None
+    min_score: Optional[float] = None
+
+class RecoResponse(BaseModel):
+    source: RecoSource
+    k: int
+    alpha: float
+    use_ptb: bool
+    filters: RecoFilters
+    count: int
+    items: List[RecoItem]
+
 @app.get("/")
 def root():
     return RedirectResponse(url="/docs")
@@ -293,7 +324,7 @@ def predict_ptb(req: PredictRequest):
         proba={str(c): float(p) for c, p in zip(class_names, proba)}
     )
 
-@app.get("/recommend")
+@app.get("/recommend", response_model=RecoResponse)
 def recommend(
     appid: int = Query(..., description="Source appid"),
     k: int = Query(10, ge=1, le=50),
@@ -301,7 +332,7 @@ def recommend(
     same_developer: bool = Query(False, description="exclude same developer as source"),
     year_from: int | None = Query(None, description="optional min release year"),
     use_ptb: bool = Query(True, description="use PTB(high) for re-ranking"),
-    min_score: float | None = Query(None, description="optional minimum blended score"),
+    min_score: float | None = Query(None, description="threshold on blended score"),
     fields: Optional[List[str]] = Query(None, description="return only these item fields"),
     debug: bool = Query(False, description="include debug metadata"),
 ):
