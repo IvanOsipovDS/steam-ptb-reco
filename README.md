@@ -1,12 +1,18 @@
 # Steam PTB & Reco — Content-Based Game Recommendations with PTB Re-Ranking
 
+[![Live – Render](https://img.shields.io/badge/demo-render.com-2a9d8f?logo=render&logoColor=white)](https://steam-ptb-reco.onrender.com)
+[![Docs – OpenAPI/Swagger](https://img.shields.io/badge/docs-openapi-6aa84f?logo=swagger&logoColor=white)](https://steam-ptb-reco.onrender.com/docs)
+[![Python](https://img.shields.io/badge/python-3.12+-3776ab?logo=python&logoColor=white)](#)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.111+-009688?logo=fastapi&logoColor=white)](#)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 A production-ready FastAPI service that:
 
-1. **Predicts PTB** (“potential to be high”) for a game using text + metadata.  
-2. **Returns content-based recommendations** (TF-IDF cosine similarity), **re-ranked** by the predicted probability of *high* PTB.
+- Predicts **PTB** (“potential to be high”) for a game using text + metadata.
+- Returns **content-based recommendations** (TF-IDF cosine similarity), re-ranked by the predicted probability of high PTB.
 
-**Live API (Swagger):** `https://steam-ptb-reco.onrender.com`  
-**Tech stack:** Python, scikit-learn, XGBoost, FastAPI, Uvicorn, Render
+> **Live API**: https://steam-ptb-reco.onrender.com  
+> **Docs (Swagger)**: https://steam-ptb-reco.onrender.com/docs
 
 ---
 
@@ -340,3 +346,4 @@ The script logs the scores, saves the best artifact and updates `models/registry
 **Contact / Feedback**
 
 Issues and PRs are welcome!
+
